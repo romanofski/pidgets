@@ -1,0 +1,27 @@
+name:                pidgets
+version:             0.1.0.0
+-- synopsis:
+-- description:
+homepage:            https://github.com/githubuser/pidgets#readme
+license:             BSD3
+license-file:        LICENSE
+author:              Róman Joost
+maintainer:          roman@bromeco.de
+copyright:           2018 Author name here
+category:            Web
+build-type:          Simple
+cabal-version:       >=1.10
+extra-source-files:  README.md
+
+executable pidgets
+  hs-source-dirs:      src
+  ghc-options:         -Wall -threaded
+  main-is:             Main.hs
+  default-language:    Haskell2010
+  build-depends:       base >= 4.7 && < 5
+                     , brick
+                     , vty
+                     , vector
+                     , text
+                     , lens
+                     , containers
