@@ -25,3 +25,4 @@ executable pidgets
                      , text
                      , lens
                      , containers
+                     , data-clist
