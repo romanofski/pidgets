@@ -29,12 +29,6 @@ import Brick.Types
        (Widget, BrickEvent(..), Next, EventM, Padding(..),
         handleEventLensed)
 
--- | The global application mode
-data Mode
-    = BrowseMail   -- ^ input focus goes to navigating the list of mails
-    | BrowseThreads  -- ^ input focus goes to navigating the list of threads
-    | ComposeEditor -- ^ focus is on the screen showing the entire mail
-
 -- | Used to identify widgets in brick
 data Name =
     ListOfThreads
@@ -68,28 +62,27 @@ data MailIndex = MailIndex
 makeLenses ''MailIndex
 
 data InternalKeybinding = InternalKeybinding Vty.Event InternalAction
-data InternalAction = InternalAction (AppState -> EventM Name (Next AppState))
+newtype InternalAction = InternalAction (AppState -> EventM Name (Next AppState))
 
 iAction :: Lens' InternalAction (AppState -> EventM Name (Next AppState))
-iAction f (InternalAction a) = fmap (\a' -> InternalAction a') (f a)
+iAction f (InternalAction a) = fmap InternalAction (f a)
 
 data AppState = AppState
     { _asMailIndex :: MailIndex
     , _asCompose :: Compose
     , _asWidgets :: V.Vector Name
     , _asFocus :: Brick.FocusRing Name
-    , _asAppMode :: Mode
     , _asKeybindings :: Map.Map Name [InternalKeybinding]
     }
 makeLenses ''AppState
 
-data Action (ctx :: Mode) = Action
+data Action (ctx :: Name) = Action
     { _aDescription :: String
     , _aAction :: AppState -> EventM Name (Next AppState)
     }
 makeLenses ''Action
 
-data Keybinding (ctx :: Mode) = Keybinding
+data Keybinding (ctx :: Name) = Keybinding
     { _kbEvent :: Vty.Event
     , _kbAction :: Action ctx
     }
@@ -248,7 +241,7 @@ initialState =
                 (L.list ListOfAttachments V.empty 1)
         view' = V.fromList [ListOfThreads, StatusBar, SearchThreadsEditor]
         ring = Brick.focusRing $ V.toList view'
-    in AppState mi compose view' ring BrowseThreads Map.empty
+    in AppState mi compose view' ring Map.empty
 
 main :: IO ()
 main = void $ M.defaultMain theApp initialState
