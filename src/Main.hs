@@ -140,17 +140,33 @@ listDrawElement selected item = if selected then withAttr L.listSelectedAttr (tx
 --
 -- | quickfix internal actions, which are usually generated and stripped of
 -- their modes. Also they're not composable and don't have any descriptions.
+
+-- list actions currently only made to interact with the list of threads
 listUp :: InternalAction
 listUp = InternalAction (M.continue . over (asMailIndex . miListOfThreads) L.listMoveUp)
 
 listDown :: InternalAction
 listDown = InternalAction (M.continue . over (asMailIndex . miListOfThreads) L.listMoveDown)
 
+-- These two were former mode changes.
+-- Back to index means that we want to return to the list of threads, home
+-- screen, whatever you want to call it. In purebred we activated the
+-- 'BrowseThreads mode and draw what belonged to that mode, yet only the list of
+-- threads had the focus. For searching you had to activate a different mode.
+--
+-- To get the same effect here, we'd replace whatever is in `asWidgets` with
+-- what we say should be shown in the index screen, e.g. list of threads, status
+-- bar and search threads.
 backToIndex :: InternalAction
 backToIndex = InternalAction (M.continue
                               . over asFocus (Brick.focusRingModify (CList.update ListOfThreads))
                               . over asWidgets (V.// [(0, ListOfThreads)]))
 
+-- Instead of activating another mode and statically draw everything belonging
+-- to this mode, just replace the list widget and set the focus on the new list
+-- widget. That keeps the status bar and the search as is. We can now use the
+-- focus ring to jump between searching threads and showing the current thread
+-- mails.
 activateListOfMails :: InternalAction
 activateListOfMails = InternalAction (M.continue
                                       . over asFocus (Brick.focusRingModify (CList.update ListOfMails))
@@ -159,8 +175,18 @@ activateListOfMails = InternalAction (M.continue
 activateSearchThreads :: InternalAction
 activateSearchThreads = InternalAction (M.continue . over asFocus (Brick.focusSetCurrent SearchThreadsEditor))
 
+focusNext :: InternalAction
+focusNext = InternalAction (M.continue . over asFocus Brick.focusNext)
+
+simulateNewSearchResult :: InternalAction
+simulateNewSearchResult = InternalAction (M.continue
+                                          . over (asMailIndex . miListOfThreads) (L.listReplace (V.fromList ["Result 1", "Result 2"]) (Just 0))
+                                          -- would be a composed action
+                                          . over asFocus (Brick.focusRingModify (CList.update ListOfThreads))
+                                          . over asWidgets (V.// [(0, ListOfThreads)]))
+
 -- | quickfix map which has already the Keybindings hacked in. Ideally we'd like
---- to fill this based on currently focuesed widget names and the Keybindings come out of the config
+--- to fill this based on currently focused widget names and the Keybindings come out of the config
 keybindingMap :: Map.Map Name [InternalKeybinding]
 keybindingMap =
     Map.fromList
@@ -173,12 +199,14 @@ keybindingMap =
                   (InternalAction M.halt)
             , InternalKeybinding (Vty.EvKey (Vty.KChar ':') []) activateSearchThreads])
         , ( ListOfMails
-          , [InternalKeybinding (Vty.EvKey (Vty.KChar 'q') []) backToIndex])
+          , [InternalKeybinding (Vty.EvKey (Vty.KChar 'q') []) backToIndex
+            , InternalKeybinding (Vty.EvKey (Vty.KChar ':') []) activateSearchThreads])
         -- The search editor isn't doing anything. In fact it does nothing,
         -- since this POC does not support sending all non-matching input for
         -- the editor to the fallback key handler
         , ( SearchThreadsEditor
-          , [InternalKeybinding (Vty.EvKey Vty.KEsc []) backToIndex])
+          , [InternalKeybinding (Vty.EvKey Vty.KEsc []) focusNext
+            , InternalKeybinding (Vty.EvKey Vty.KEnter []) simulateNewSearchResult ])
         ]
 
 lookupKeybinding :: Event -> Maybe [InternalKeybinding] -> Maybe InternalKeybinding
@@ -240,7 +268,7 @@ initialState =
                      [ComposeFrom, ComposeTo, ComposeSubject, ListOfAttachments])
                 (L.list ListOfAttachments V.empty 1)
         view' = V.fromList [ListOfThreads, StatusBar, SearchThreadsEditor]
-        ring = Brick.focusRing $ V.toList view'
+        ring = Brick.focusRing [ListOfThreads, SearchThreadsEditor]
     in AppState mi compose view' ring Map.empty
 
 main :: IO ()
