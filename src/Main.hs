@@ -11,6 +11,8 @@ import Graphics.Vty (Event (..))
 import Data.Foldable (find)
 import Data.Maybe (fromMaybe)
 import Data.Proxy
+import Data.Semigroup ((<>), Semigroup)
+import Data.Monoid (Monoid, mempty, mappend)
 import qualified Data.CircularList as CList
 import qualified Data.Map as Map
 import qualified Data.Vector as V
@@ -92,41 +94,48 @@ makeLenses ''Keybinding
 -- Drawing code
 --
 drawUI :: AppState -> [Widget Name]
-drawUI s = let view' = view asWidgets s
-           in [foldr (renderWidget s) emptyWidget view']
+drawUI s = [unVBox $ foldMap (VBox . renderWidget s) (view asWidgets s)]
 
-renderWidget :: AppState -> Name -> Widget Name -> Widget Name
-renderWidget s ListOfThreads widgets = draw (Proxy :: Proxy 'ListOfThreads) s <=> widgets
-renderWidget s SearchThreadsEditor widgets = draw (Proxy :: Proxy 'SearchThreadsEditor) s <=> widgets
-renderWidget s StatusBar widgets = draw (Proxy :: Proxy 'StatusBar) s <=> widgets
-renderWidget s ListOfMails widgets = draw (Proxy :: Proxy 'ListOfMails) s <=> widgets
+newtype VBox = VBox { unVBox :: Widget Name }
 
-class UIDrawer (a :: Name) where
-  draw :: Proxy a -> AppState -> Widget Name
+instance Semigroup VBox where
+  VBox a <> VBox b = VBox (a <=> b)
 
-instance UIDrawer 'StatusBar where
-  draw _ s =
-        withAttr statusbarAttr $
-        str (show (Brick.focusGetCurrent (view asFocus s))) <+>
-        padLeft
-            (Pad 1)
-            (str
-                 (show
-                      (view
-                           (asMailIndex . miListOfThreads . L.listSelectedL)
-                           s))) <+>
-        vLimit 1 (fill ' ')
+instance Monoid VBox where
+  mappend = (<>)
+  mempty = VBox emptyWidget
 
-instance UIDrawer 'ListOfThreads where
-  draw _ = renderMailList
+renderWidget :: AppState -> Name -> Widget Name
+renderWidget s ListOfThreads = drawListOfThreads s
+renderWidget s SearchThreadsEditor = drawSearchThreadsEditor s
+renderWidget s StatusBar = drawStatusBar s
+renderWidget s ListOfMails = drawListOfMails s
 
-instance UIDrawer 'ListOfMails where
-  draw _ s = let hasFocus = Just ListOfMails == Brick.focusGetCurrent (view asFocus s)
-             in L.renderList listDrawElement hasFocus $ view (asMailIndex . miListOfMails) s
+drawListOfThreads :: AppState -> Widget Name
+drawListOfThreads = renderMailList
 
-instance UIDrawer 'SearchThreadsEditor where
-  draw _ s = let hasFocus = Just SearchThreadsEditor == Brick.focusGetCurrent (view asFocus s)
-             in vLimit 1 $ E.renderEditor (txt . T.unlines) hasFocus $ view (asMailIndex . miSearchThreadsEditor) s
+drawStatusBar :: AppState -> Widget Name
+drawStatusBar s =
+  withAttr statusbarAttr $
+  str (show (Brick.focusGetCurrent (view asFocus s))) <+>
+  padLeft
+      (Pad 1)
+      (str
+           (show
+                (view
+                     (asMailIndex . miListOfThreads . L.listSelectedL)
+                     s))) <+>
+  vLimit 1 (fill ' ')
+
+drawListOfMails :: AppState -> Widget Name
+drawListOfMails s =
+  let hasFocus = Just ListOfMails == Brick.focusGetCurrent (view asFocus s)
+  in L.renderList listDrawElement hasFocus $ view (asMailIndex . miListOfMails) s
+
+drawSearchThreadsEditor :: AppState -> Widget Name
+drawSearchThreadsEditor s =
+  let hasFocus = Just SearchThreadsEditor == Brick.focusGetCurrent (view asFocus s)
+  in vLimit 1 $ E.renderEditor (txt . T.unlines) hasFocus $ view (asMailIndex . miSearchThreadsEditor) s
 
 renderMailList :: AppState -> Widget Name
 renderMailList s = let hasFocus = Just ListOfThreads == Brick.focusGetCurrent (view asFocus s)
