@@ -66,9 +66,6 @@ makeLenses ''MailIndex
 data InternalKeybinding = InternalKeybinding Vty.Event InternalAction
 newtype InternalAction = InternalAction (AppState -> EventM Name (Next AppState))
 
-iAction :: Lens' InternalAction (AppState -> EventM Name (Next AppState))
-iAction f (InternalAction a) = fmap InternalAction (f a)
-
 data AppState = AppState
     { _asMailIndex :: MailIndex
     , _asCompose :: Compose
@@ -87,6 +84,9 @@ data Keybinding ctx a = Keybinding
     { _kbEvent :: Vty.Event
     , _kbAction :: Action ctx a
     }
+
+kbAction :: Getter (Keybinding ctx a) (Action ctx a)
+kbAction = to (\(Keybinding _ b) -> b)
 
 data Configuration = Configuration
   { _confListOfThreadsKeybindings :: [Keybinding (L.List Name T.Text) (Next AppState)]
@@ -155,6 +155,9 @@ listDrawElement selected item = if selected then withAttr L.listSelectedAttr (tx
 continue :: Action ctx (Next AppState)
 continue = Action "" (\_ s -> M.continue s)
 
+quit :: Action ctx (Next AppState)
+quit = Action "" (\_ s -> M.halt s)
+
 -- list actions currently only made to interact with the list of threads
 listUp :: Action (L.List Name T.Text) AppState
 listUp =
@@ -213,12 +216,7 @@ keybindingMap :: Map.Map Name [InternalKeybinding]
 keybindingMap =
     Map.fromList
         [ ( ListOfThreads
-          , [--  InternalKeybinding (Vty.EvKey (Vty.KChar 'j') []) listDown
-            -- , InternalKeybinding (Vty.EvKey (Vty.KChar 'k') []) listUp
-             InternalKeybinding (Vty.EvKey Vty.KEnter []) activateListOfMails
-            , InternalKeybinding
-                  (Vty.EvKey (Vty.KChar 'q') [])
-                  (InternalAction M.halt)
+          , [InternalKeybinding (Vty.EvKey Vty.KEnter []) activateListOfMails
             , InternalKeybinding (Vty.EvKey (Vty.KChar ':') []) activateSearchThreads])
         , ( ListOfMails
           , [InternalKeybinding (Vty.EvKey (Vty.KChar 'q') []) backToIndex
@@ -248,18 +246,22 @@ keybindingMap' =
     Map.fromList
         [ ( ListOfThreads
           , [ Keybinding (Vty.EvKey (Vty.KChar 'j') []) (listDown `chain` continue)
-            , Keybinding (Vty.EvKey (Vty.KChar 'k') []) (listUp `chain` continue)])]
+            , Keybinding (Vty.EvKey (Vty.KChar 'k') []) (listUp `chain` continue)
+            , Keybinding (Vty.EvKey (Vty.KChar 'q') []) quit])]
 
-lookupKeybinding :: Event -> Maybe [InternalKeybinding] -> Maybe InternalKeybinding
+lookupKeybinding :: Event -> Maybe [Keybinding ctx a] -> Maybe (Keybinding ctx a)
 lookupKeybinding _ Nothing = Nothing
-lookupKeybinding e (Just kbs) = find (\(InternalKeybinding kbEv _) -> kbEv == e) kbs
+lookupKeybinding e (Just kbs) = find (\(Keybinding kbEv _) -> kbEv == e) kbs
+
+getFocusedLens :: Name -> Lens' AppState (L.List Name T.Text)
+getFocusedLens ListOfThreads = (asMailIndex . miListOfThreads)
 
 dispatch :: AppState -> Event -> EventM Name (Next AppState)
 dispatch s e = let ring = view asFocus s
                    currentlyFocused = fromMaybe ListOfThreads (Brick.focusGetCurrent ring)
-                   kbs = Map.lookup currentlyFocused keybindingMap
+                   kbs = Map.lookup currentlyFocused keybindingMap'
                in case lookupKeybinding e kbs of
-                      Just (InternalKeybinding _ kb) -> s & view iAction kb
+                      Just (Keybinding _ (Action _ a)) -> a (getFocusedLens currentlyFocused) s
                       Nothing -> M.continue s -- would be the fallback
 
 appEvent :: AppState -> BrickEvent Name e -> EventM Name (Next AppState)
