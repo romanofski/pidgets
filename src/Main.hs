@@ -1,3 +1,4 @@
+{-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE KindSignatures #-}
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE TemplateHaskell #-}
@@ -6,11 +7,10 @@ module Main where
 
 import Control.Lens
 import Control.Lens.TH (makeLenses)
-import Control.Monad (void)
+import Control.Monad (void, (>=>))
 import Graphics.Vty (Event (..))
 import Data.Foldable (find)
 import Data.Maybe (fromMaybe)
-import Data.Proxy
 import Data.Semigroup ((<>), Semigroup)
 import Data.Monoid (Monoid, mempty, mappend)
 import qualified Data.CircularList as CList
@@ -78,17 +78,20 @@ data AppState = AppState
     }
 makeLenses ''AppState
 
-data Action (ctx :: Name) = Action
+data Action ctx a = Action
     { _aDescription :: String
-    , _aAction :: AppState -> EventM Name (Next AppState)
+    , _aAction :: Lens' AppState ctx -> AppState -> EventM Name a
     }
-makeLenses ''Action
 
-data Keybinding (ctx :: Name) = Keybinding
+data Keybinding ctx a = Keybinding
     { _kbEvent :: Vty.Event
-    , _kbAction :: Action ctx
+    , _kbAction :: Action ctx a
     }
-makeLenses ''Keybinding
+
+data Configuration = Configuration
+  { _confListOfThreadsKeybindings :: [Keybinding (L.List Name T.Text) (Next AppState)]
+  , _confSearchThreadsKeybindings :: [Keybinding (E.Editor T.Text Name) (Next AppState)]
+  }
 
 
 -- Drawing code
@@ -149,13 +152,23 @@ listDrawElement selected item = if selected then withAttr L.listSelectedAttr (tx
 --
 -- | quickfix internal actions, which are usually generated and stripped of
 -- their modes. Also they're not composable and don't have any descriptions.
+continue :: Action ctx (Next AppState)
+continue = Action "" (\_ s -> M.continue s)
 
 -- list actions currently only made to interact with the list of threads
-listUp :: InternalAction
-listUp = InternalAction (M.continue . over (asMailIndex . miListOfThreads) L.listMoveUp)
+listUp :: Action (L.List Name T.Text) AppState
+listUp =
+    Action
+    { _aDescription = "list up"
+    , _aAction = \l s -> pure $ over l L.listMoveUp s
+    }
 
-listDown :: InternalAction
-listDown = InternalAction (M.continue . over (asMailIndex . miListOfThreads) L.listMoveDown)
+listDown :: Action (L.List Name T.Text) AppState
+listDown =
+    Action
+    { _aDescription = "list down"
+    , _aAction = \l s -> pure $ over l L.listMoveDown s
+    }
 
 -- These two were former mode changes.
 -- Back to index means that we want to return to the list of threads, home
@@ -200,9 +213,9 @@ keybindingMap :: Map.Map Name [InternalKeybinding]
 keybindingMap =
     Map.fromList
         [ ( ListOfThreads
-          , [ InternalKeybinding (Vty.EvKey (Vty.KChar 'j') []) listDown
-            , InternalKeybinding (Vty.EvKey (Vty.KChar 'k') []) listUp
-            , InternalKeybinding (Vty.EvKey Vty.KEnter []) activateListOfMails
+          , [--  InternalKeybinding (Vty.EvKey (Vty.KChar 'j') []) listDown
+            -- , InternalKeybinding (Vty.EvKey (Vty.KChar 'k') []) listUp
+             InternalKeybinding (Vty.EvKey Vty.KEnter []) activateListOfMails
             , InternalKeybinding
                   (Vty.EvKey (Vty.KChar 'q') [])
                   (InternalAction M.halt)
@@ -217,6 +230,25 @@ keybindingMap =
           , [InternalKeybinding (Vty.EvKey Vty.KEsc []) focusNext
             , InternalKeybinding (Vty.EvKey Vty.KEnter []) simulateNewSearchResult ])
         ]
+
+chain :: Action ctx AppState -> Action ctx a -> Action ctx a
+chain (Action d1 f1) (Action d2 f2) =
+  Action (if null d2 then d1 else d1 <> " and then " <> d2) (f1 `chainF` f2)
+
+chainF
+    :: (Lens' AppState ctx -> AppState -> EventM Name AppState)
+    -> (Lens' AppState ctx -> AppState -> EventM Name b)
+    -> (Lens' AppState ctx)
+    -> AppState
+    -> EventM Name b
+chainF fx gx l = fx l >=> gx l
+
+keybindingMap' :: Map.Map Name [Keybinding (L.List Name T.Text) (Next AppState)]
+keybindingMap' =
+    Map.fromList
+        [ ( ListOfThreads
+          , [ Keybinding (Vty.EvKey (Vty.KChar 'j') []) (listDown `chain` continue)
+            , Keybinding (Vty.EvKey (Vty.KChar 'k') []) (listUp `chain` continue)])]
 
 lookupKeybinding :: Event -> Maybe [InternalKeybinding] -> Maybe InternalKeybinding
 lookupKeybinding _ Nothing = Nothing
