@@ -13,7 +13,6 @@ import Data.Foldable (find)
 import Data.Maybe (fromMaybe)
 import Data.Semigroup ((<>), Semigroup)
 import Data.Monoid (Monoid, mempty, mappend)
-import qualified Data.CircularList as CList
 import qualified Data.Map as Map
 import qualified Data.Vector as V
 import qualified Data.Text as T
@@ -78,6 +77,7 @@ makeLenses ''AppState
 data Action ctx a = Action
     { _aDescription :: String
     , _aAction :: Lens' AppState ctx -> AppState -> EventM Name a
+    , _aLens :: Lens' AppState ctx
     }
 
 data Keybinding ctx a = Keybinding
@@ -109,10 +109,10 @@ instance Monoid VBox where
   mempty = VBox emptyWidget
 
 renderWidget :: AppState -> Name -> Widget Name
-renderWidget s ListOfThreads = drawListOfThreads s
 renderWidget s SearchThreadsEditor = drawSearchThreadsEditor s
 renderWidget s StatusBar = drawStatusBar s
 renderWidget s ListOfMails = drawListOfMails s
+renderWidget s _ = drawListOfThreads s
 
 drawListOfThreads :: AppState -> Widget Name
 drawListOfThreads = renderMailList
@@ -153,85 +153,67 @@ listDrawElement selected item = if selected then withAttr L.listSelectedAttr (tx
 -- | quickfix internal actions, which are usually generated and stripped of
 -- their modes. Also they're not composable and don't have any descriptions.
 continue :: Action ctx (Next AppState)
-continue = Action "" (\_ s -> M.continue s)
+continue =
+    Action
+    { _aDescription = ""
+    , _aAction = (\_ s -> M.continue s)
+    }
 
 quit :: Action ctx (Next AppState)
-quit = Action "" (\_ s -> M.halt s)
+quit =
+    Action
+    { _aDescription = ""
+    , _aAction = (\_ s -> M.halt s)
+    }
 
 -- list actions currently only made to interact with the list of threads
-listUp :: Action (L.List Name T.Text) AppState
-listUp =
+listUp :: Lens' AppState (L.List Name T.Text) -> Action (L.List Name T.Text) AppState
+listUp l =
     Action
     { _aDescription = "list up"
-    , _aAction = \l s -> pure $ over l L.listMoveUp s
+    , _aAction = \l' s -> pure $ over l' L.listMoveUp s
+    , _aLens = l
     }
 
-listDown :: Action (L.List Name T.Text) AppState
-listDown =
+listDown :: Lens' AppState (L.List Name T.Text) -> Action (L.List Name T.Text) AppState
+listDown l =
     Action
     { _aDescription = "list down"
-    , _aAction = \l s -> pure $ over l L.listMoveDown s
+    , _aAction = \l' s -> pure $ over l' L.listMoveDown s
+    , _aLens = l
     }
 
--- These two were former mode changes.
--- Back to index means that we want to return to the list of threads, home
--- screen, whatever you want to call it. In purebred we activated the
--- 'BrowseThreads mode and draw what belonged to that mode, yet only the list of
--- threads had the focus. For searching you had to activate a different mode.
---
--- To get the same effect here, we'd replace whatever is in `asWidgets` with
--- what we say should be shown in the index screen, e.g. list of threads, status
--- bar and search threads.
-backToIndex :: InternalAction
-backToIndex = InternalAction (M.continue
-                              . over asFocus (Brick.focusRingModify (CList.update ListOfThreads))
-                              . over asWidgets (V.// [(0, ListOfThreads)]))
+focus :: Name -> Action a AppState
+focus n =
+    Action
+    { _aDescription = "switch mode"
+    , _aAction = (\_ ->
+                       pure .
+                       over asFocus (Brick.focusSetCurrent n) .
+                       over asWidgets (addOrUpdate n))
+    }
 
--- Instead of activating another mode and statically draw everything belonging
--- to this mode, just replace the list widget and set the focus on the new list
--- widget. That keeps the status bar and the search as is. We can now use the
--- focus ring to jump between searching threads and showing the current thread
--- mails.
-activateListOfMails :: InternalAction
-activateListOfMails = InternalAction (M.continue
-                                      . over asFocus (Brick.focusRingModify (CList.update ListOfMails))
-                                      . over asWidgets (V.// [(0, ListOfMails)]))
+-- Helper function to either add the new name into our list of widgets to render
+-- or keep the existing if it's already in there. The point is to avoid
+-- duplicate items. TODO: perhaps simply use a set and also figure out how to
+-- remove names
+addOrUpdate :: Eq a => a -> V.Vector a -> V.Vector a
+addOrUpdate item vec =
+    if V.elem item vec
+        then vec
+        else (vec V.// [(0, item)])
 
-activateSearchThreads :: InternalAction
-activateSearchThreads = InternalAction (M.continue . over asFocus (Brick.focusSetCurrent SearchThreadsEditor))
 
-focusNext :: InternalAction
-focusNext = InternalAction (M.continue . over asFocus Brick.focusNext)
-
-simulateNewSearchResult :: InternalAction
-simulateNewSearchResult = InternalAction (M.continue
-                                          . over (asMailIndex . miListOfThreads) (L.listReplace (V.fromList ["Result 1", "Result 2"]) (Just 0))
-                                          -- would be a composed action
-                                          . over asFocus (Brick.focusRingModify (CList.update ListOfThreads))
-                                          . over asWidgets (V.// [(0, ListOfThreads)]))
-
--- | quickfix map which has already the Keybindings hacked in. Ideally we'd like
---- to fill this based on currently focused widget names and the Keybindings come out of the config
-keybindingMap :: Map.Map Name [InternalKeybinding]
-keybindingMap =
-    Map.fromList
-        [ ( ListOfThreads
-          , [InternalKeybinding (Vty.EvKey Vty.KEnter []) activateListOfMails
-            , InternalKeybinding (Vty.EvKey (Vty.KChar ':') []) activateSearchThreads])
-        , ( ListOfMails
-          , [InternalKeybinding (Vty.EvKey (Vty.KChar 'q') []) backToIndex
-            , InternalKeybinding (Vty.EvKey (Vty.KChar ':') []) activateSearchThreads])
-        -- The search editor isn't doing anything. In fact it does nothing,
-        -- since this POC does not support sending all non-matching input for
-        -- the editor to the fallback key handler
-        , ( SearchThreadsEditor
-          , [InternalKeybinding (Vty.EvKey Vty.KEsc []) focusNext
-            , InternalKeybinding (Vty.EvKey Vty.KEnter []) simulateNewSearchResult ])
-        ]
+simulateNewSearchResult :: Lens' AppState (L.List Name T.Text) -> Action (L.List Name T.Text) AppState
+simulateNewSearchResult l = Action {
+  _aDescription = ""
+  , _aAction = \_ -> pure . over l (L.listReplace (V.fromList ["Result 1", "Result 2"]) (Just 0))
+  , _aLens = l
+}
 
 chain :: Action ctx AppState -> Action ctx a -> Action ctx a
-chain (Action d1 f1) (Action d2 f2) =
-  Action (if null d2 then d1 else d1 <> " and then " <> d2) (f1 `chainF` f2)
+chain (Action d1 f1 l) (Action d2 f2 _) =
+  Action (if null d2 then d1 else d1 <> " and then " <> d2) (f1 `chainF` f2) l
 
 chainF
     :: (Lens' AppState ctx -> AppState -> EventM Name AppState)
@@ -245,27 +227,30 @@ keybindingMap' :: Map.Map Name [Keybinding (L.List Name T.Text) (Next AppState)]
 keybindingMap' =
     Map.fromList
         [ ( ListOfThreads
-          , [ Keybinding (Vty.EvKey (Vty.KChar 'j') []) (listDown `chain` continue)
-            , Keybinding (Vty.EvKey (Vty.KChar 'k') []) (listUp `chain` continue)
-            , Keybinding (Vty.EvKey (Vty.KChar 'q') []) quit])]
+          , [ Keybinding (Vty.EvKey (Vty.KChar 'j') []) (listDown (asMailIndex . miListOfThreads) `chain` continue)
+            , Keybinding (Vty.EvKey (Vty.KChar 'k') []) (listUp (asMailIndex . miListOfThreads) `chain` continue)
+            , Keybinding (Vty.EvKey Vty.KEnter []) (focus ListOfMails `chain` continue)
+            , Keybinding (Vty.EvKey (Vty.KChar ':') []) (focus SearchThreadsEditor `chain` continue)
+            , Keybinding (Vty.EvKey (Vty.KChar 'q') []) quit])
+        , ( ListOfMails
+          , [ Keybinding (Vty.EvKey (Vty.KChar 'j') []) (listDown (asMailIndex . miListOfMails) `chain` continue)
+            , Keybinding (Vty.EvKey (Vty.KChar 'k') []) (listUp (asMailIndex . miListOfMails) `chain` continue)
+            , Keybinding (Vty.EvKey (Vty.KChar 'q') []) (focus ListOfThreads `chain` continue)])
+        , ( SearchThreadsEditor
+          , [ Keybinding (Vty.EvKey Vty.KEsc []) (focus ListOfThreads `chain` continue)
+            , Keybinding (Vty.EvKey Vty.KEnter []) (simulateNewSearchResult (asMailIndex . miListOfThreads) `chain` focus ListOfThreads `chain` continue)])
+        ]
 
 lookupKeybinding :: Event -> Maybe [Keybinding ctx a] -> Maybe (Keybinding ctx a)
 lookupKeybinding _ Nothing = Nothing
 lookupKeybinding e (Just kbs) = find (\(Keybinding kbEv _) -> kbEv == e) kbs
 
-getFocusedLens :: Name -> Lens' AppState (L.List Name T.Text)
-getFocusedLens ListOfThreads = (asMailIndex . miListOfThreads)
-
-dispatch :: AppState -> Event -> EventM Name (Next AppState)
-dispatch s e = let ring = view asFocus s
-                   currentlyFocused = fromMaybe ListOfThreads (Brick.focusGetCurrent ring)
-                   kbs = Map.lookup currentlyFocused keybindingMap'
-               in case lookupKeybinding e kbs of
-                      Just (Keybinding _ (Action _ a)) -> a (getFocusedLens currentlyFocused) s
-                      Nothing -> M.continue s -- would be the fallback
-
 appEvent :: AppState -> BrickEvent Name e -> EventM Name (Next AppState)
-appEvent s (VtyEvent ev) = dispatch s ev
+appEvent s (VtyEvent ev) = let currentlyFocused = fromMaybe ListOfThreads (Brick.focusGetCurrent (view asFocus s))
+                               kbs = Map.lookup currentlyFocused keybindingMap'
+                           in case lookupKeybinding ev kbs of
+                                  Just (Keybinding _ (Action _ a l)) -> a l s
+                                  Nothing -> M.continue s -- would be the fallback
 appEvent s _ = M.continue s
 
 -- main stuff
