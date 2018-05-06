@@ -62,15 +62,11 @@ data MailIndex = MailIndex
     }
 makeLenses ''MailIndex
 
-data InternalKeybinding = InternalKeybinding Vty.Event InternalAction
-newtype InternalAction = InternalAction (AppState -> EventM Name (Next AppState))
-
 data AppState = AppState
     { _asMailIndex :: MailIndex
     , _asCompose :: Compose
     , _asWidgets :: V.Vector Name
     , _asFocus :: Brick.FocusRing Name
-    , _asKeybindings :: Map.Map Name [InternalKeybinding]
     }
 makeLenses ''AppState
 
@@ -297,7 +293,7 @@ initialState =
                 (L.list ListOfAttachments V.empty 1)
         view' = V.fromList [ListOfThreads, StatusBar, SearchThreadsEditor]
         ring = Brick.focusRing [ListOfThreads, SearchThreadsEditor]
-    in AppState mi compose view' ring Map.empty
+    in AppState mi compose view' ring
 
 main :: IO ()
 main = void $ M.defaultMain theApp initialState
