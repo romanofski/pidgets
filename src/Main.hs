@@ -1,8 +1,18 @@
+{-# LANGUAGE GADTs #-}
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE KindSignatures #-}
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE TemplateHaskell #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-
+Current Problems:
+* Actions Lenses share Actions contex: e.g. I want to complete a search on an
+  editor by pressing Enter, which then replaces the list of threads with a new
+  list. The action for this will be defined for the editor, which then clashes
+  with the lens performing the action, which will have to be defined for the
+  list.
+* keybindingMap' is currently useless
+-}
 module Main where
 
 import Control.Lens
@@ -24,11 +34,11 @@ import qualified Brick.Focus as Brick
 import qualified Brick.AttrMap as A
 import Brick.Util (on)
 import Brick.Widgets.Core
-       (fill, emptyWidget, str, hLimit, padLeft, txt, vBox, vLimit,
-        withAttr, (<+>), (<=>))
+       (fill, emptyWidget, str, padLeft, txt, vLimit, withAttr, (<+>), (<=>))
+
 import Brick.Types
-       (Widget, BrickEvent(..), Next, EventM, Padding(..),
-        handleEventLensed)
+       (Widget, BrickEvent(..), Next, EventM, Padding(..))
+
 
 -- | Used to identify widgets in brick
 data Name =
@@ -70,11 +80,9 @@ data AppState = AppState
     }
 makeLenses ''AppState
 
-data Action ctx a = Action
-    { _aDescription :: String
-    , _aAction :: Lens' AppState ctx -> AppState -> EventM Name a
-    , _aLens :: Lens' AppState ctx
-    }
+data Action ctx a where
+  GenericAction :: String -> (AppState -> EventM Name a) -> Action ctx a
+  Action :: String -> (Lens' AppState ctx -> AppState -> EventM Name a) -> Lens' AppState ctx -> Action ctx a
 
 data Keybinding ctx a = Keybinding
     { _kbEvent :: Vty.Event
@@ -149,45 +157,26 @@ listDrawElement selected item = if selected then withAttr L.listSelectedAttr (tx
 -- | quickfix internal actions, which are usually generated and stripped of
 -- their modes. Also they're not composable and don't have any descriptions.
 continue :: Action ctx (Next AppState)
-continue =
-    Action
-    { _aDescription = ""
-    , _aAction = (\_ s -> M.continue s)
-    }
+continue = GenericAction "" M.continue
 
 quit :: Action ctx (Next AppState)
 quit =
-    Action
-    { _aDescription = ""
-    , _aAction = (\_ s -> M.halt s)
-    }
+    GenericAction "" M.halt
 
 -- list actions currently only made to interact with the list of threads
 listUp :: Lens' AppState (L.List Name T.Text) -> Action (L.List Name T.Text) AppState
-listUp l =
-    Action
-    { _aDescription = "list up"
-    , _aAction = \l' s -> pure $ over l' L.listMoveUp s
-    , _aLens = l
-    }
+listUp l = Action "list up" (\l' s -> pure $ over l' L.listMoveUp s) l
 
 listDown :: Lens' AppState (L.List Name T.Text) -> Action (L.List Name T.Text) AppState
-listDown l =
-    Action
-    { _aDescription = "list down"
-    , _aAction = \l' s -> pure $ over l' L.listMoveDown s
-    , _aLens = l
-    }
+listDown l = Action "list down" (\l' s -> pure $ over l' L.listMoveDown s) l
 
 focus :: Name -> Action a AppState
 focus n =
-    Action
-    { _aDescription = "switch mode"
-    , _aAction = (\_ ->
-                       pure .
-                       over asFocus (Brick.focusSetCurrent n) .
-                       over asWidgets (addOrUpdate n))
-    }
+    GenericAction
+        "switch mode"
+        (pure
+         . over asFocus (Brick.focusSetCurrent n)
+         . over asWidgets (addOrUpdate n))
 
 -- Helper function to either add the new name into our list of widgets to render
 -- or keep the existing if it's already in there. The point is to avoid
@@ -201,16 +190,20 @@ addOrUpdate item vec =
 
 
 simulateNewSearchResult :: Lens' AppState (L.List Name T.Text) -> Action (L.List Name T.Text) AppState
-simulateNewSearchResult l = Action {
-  _aDescription = ""
-  , _aAction = \_ -> pure . over l (L.listReplace (V.fromList ["Result 1", "Result 2"]) (Just 0))
-  , _aLens = l
-}
+simulateNewSearchResult l = Action "" (\l' -> pure . over l' (L.listReplace (V.fromList ["Result 1", "Result 2"]) (Just 0))) l
 
 chain :: Action ctx AppState -> Action ctx a -> Action ctx a
 chain (Action d1 f1 l) (Action d2 f2 _) =
   Action (if null d2 then d1 else d1 <> " and then " <> d2) (f1 `chainF` f2) l
+chain (GenericAction d1 f1) (GenericAction d2 f2) =
+  GenericAction (if null d2 then d1 else d1 <> " and then " <> d2) (f1 >=> f2)
+chain (GenericAction d1 f1) (Action d2 f2 l) =
+  Action (if null d2 then d1 else d1 <> " and then " <> d2) (f1 `chainF'` f2) l
+chain (Action d1 f1 l) (GenericAction d2 f2) =
+  Action (if null d2 then d1 else d1 <> " and then " <> d2) (f1 `chainF''` f2) l
 
+-- Helper functions to compose Action functions
+-- TODO: DRY
 chainF
     :: (Lens' AppState ctx -> AppState -> EventM Name AppState)
     -> (Lens' AppState ctx -> AppState -> EventM Name b)
@@ -218,6 +211,22 @@ chainF
     -> AppState
     -> EventM Name b
 chainF fx gx l = fx l >=> gx l
+
+chainF'
+    :: (AppState -> EventM Name AppState)
+    -> (Lens' AppState ctx -> AppState -> EventM Name b)
+    -> (Lens' AppState ctx)
+    -> AppState
+    -> EventM Name b
+chainF' fx gx l = fx >=> gx l
+
+chainF''
+    :: (Lens' AppState ctx -> AppState -> EventM Name AppState)
+    -> (AppState -> EventM Name a)
+    -> (Lens' AppState ctx)
+    -> AppState
+    -> EventM Name a
+chainF'' fx gx l s = fx l s >>= \s' -> gx s'
 
 keybindingMap' :: Map.Map Name [Keybinding (L.List Name T.Text) (Next AppState)]
 keybindingMap' =
@@ -246,6 +255,7 @@ appEvent s (VtyEvent ev) = let currentlyFocused = fromMaybe ListOfThreads (Brick
                                kbs = Map.lookup currentlyFocused keybindingMap'
                            in case lookupKeybinding ev kbs of
                                   Just (Keybinding _ (Action _ a l)) -> a l s
+                                  Just (Keybinding _ (GenericAction _ a)) -> a s
                                   Nothing -> M.continue s -- would be the fallback
 appEvent s _ = M.continue s
 
