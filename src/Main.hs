@@ -11,7 +11,6 @@ Current Problems:
   list. The action for this will be defined for the editor, which then clashes
   with the lens performing the action, which will have to be defined for the
   list.
-* keybindingMap' is currently useless
 -}
 module Main where
 
@@ -23,7 +22,6 @@ import Data.Foldable (find)
 import Data.Maybe (fromMaybe)
 import Data.Semigroup ((<>), Semigroup)
 import Data.Monoid (Monoid, mempty, mappend)
-import qualified Data.Map as Map
 import qualified Data.Vector as V
 import qualified Data.Text as T
 import qualified Graphics.Vty as Vty
@@ -110,7 +108,14 @@ data Configuration = Configuration
   , _confSearchThreadsKeybindings :: [Keybinding (L.List Name T.Text) (Next AppState)]
   }
 
+confListOfThreadsKeybindings :: Lens' Configuration ([Keybinding (L.List Name T.Text) (Next AppState)])
+confListOfThreadsKeybindings = lens _confListOfThreadsKeybindings (\conf x -> conf { _confListOfThreadsKeybindings = x })
 
+confListOfMailsKeybindings :: Lens' Configuration ([Keybinding (L.List Name T.Text) (Next AppState)])
+confListOfMailsKeybindings = lens _confListOfMailsKeybindings (\conf x -> conf { _confListOfMailsKeybindings = x })
+
+confSearchThreadsKeybindings :: Lens' Configuration ([Keybinding (L.List Name T.Text) (Next AppState)])
+confSearchThreadsKeybindings = lens _confSearchThreadsKeybindings (\conf x -> conf { _confSearchThreadsKeybindings = x })
 -- Drawing code
 --
 drawUI :: AppState -> [Widget Name]
@@ -241,32 +246,22 @@ chainF''
     -> EventM Name a
 chainF'' fx gx l s = fx l s >>= \s' -> gx s'
 
-keybindingMap' :: Map.Map Name [Keybinding (L.List Name T.Text) (Next AppState)]
-keybindingMap' =
-    Map.fromList
-        [ ( ListOfThreads
-          , [ Keybinding (Vty.EvKey (Vty.KChar 'j') []) (listDown (asMailIndex . miListOfThreads) `chain` continue)
-            , Keybinding (Vty.EvKey (Vty.KChar 'k') []) (listUp (asMailIndex . miListOfThreads) `chain` continue)
-            , Keybinding (Vty.EvKey Vty.KEnter []) (focus ListOfMails `chain` continue)
-            , Keybinding (Vty.EvKey (Vty.KChar ':') []) (focus SearchThreadsEditor `chain` continue)
-            , Keybinding (Vty.EvKey (Vty.KChar 'q') []) quit])
-        , ( ListOfMails
-          , [ Keybinding (Vty.EvKey (Vty.KChar 'j') []) (listDown (asMailIndex . miListOfMails) `chain` continue)
-            , Keybinding (Vty.EvKey (Vty.KChar 'k') []) (listUp (asMailIndex . miListOfMails) `chain` continue)
-            , Keybinding (Vty.EvKey (Vty.KChar 'q') []) (focus ListOfThreads `chain` continue)])
-        , ( SearchThreadsEditor
-          , [ Keybinding (Vty.EvKey Vty.KEsc []) (focus ListOfThreads `chain` continue)
-            , Keybinding (Vty.EvKey Vty.KEnter []) (simulateNewSearchResult (asMailIndex . miListOfThreads) `chain` focus ListOfThreads `chain` continue)])
-        ]
-
-lookupKeybinding :: Event -> Maybe [Keybinding ctx a] -> Maybe (Keybinding ctx a)
-lookupKeybinding _ Nothing = Nothing
-lookupKeybinding e (Just kbs) = find (\(Keybinding kbEv _) -> kbEv == e) kbs
+lookupKeybinding :: Event -> [Keybinding ctx a] -> Maybe (Keybinding ctx a)
+lookupKeybinding e kbs = find (\(Keybinding kbEv _) -> kbEv == e) kbs
 
 appEvent :: AppState -> BrickEvent Name e -> EventM Name (Next AppState)
 appEvent s (VtyEvent ev) = let currentlyFocused = fromMaybe ListOfThreads (Brick.focusGetCurrent (view asFocus s))
-                               kbs = Map.lookup currentlyFocused keybindingMap'
-                           in case lookupKeybinding ev kbs of
+                           in case currentlyFocused of
+                                SearchThreadsEditor -> case lookupKeybinding ev (view (asConfig . confSearchThreadsKeybindings) s) of
+                                  Just (Keybinding _ (Action _ a l)) -> a l s
+                                  Just (Keybinding _ (GenericAction _ a)) -> a s
+                                  Nothing -> M.continue s -- would be the fallback
+                                ListOfMails -> case lookupKeybinding ev (view (asConfig . confListOfMailsKeybindings) s) of
+                                  Just (Keybinding _ (Action _ a l)) -> a l s
+                                  Just (Keybinding _ (GenericAction _ a)) -> a s
+                                  Nothing -> M.continue s -- would be the fallback
+                                -- TODO: default to ListOfThreads for this POC
+                                _ -> case lookupKeybinding ev (view (asConfig . confListOfThreadsKeybindings) s) of
                                   Just (Keybinding _ (Action _ a l)) -> a l s
                                   Just (Keybinding _ (GenericAction _ a)) -> a s
                                   Nothing -> M.continue s -- would be the fallback
