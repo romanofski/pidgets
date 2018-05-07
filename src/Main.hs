@@ -77,8 +77,20 @@ data AppState = AppState
     , _asCompose :: Compose
     , _asWidgets :: V.Vector Name
     , _asFocus :: Brick.FocusRing Name
+    , _asConfig :: Configuration
     }
-makeLenses ''AppState
+
+asMailIndex :: Lens' AppState MailIndex
+asMailIndex = lens _asMailIndex (\appstate x -> appstate { _asMailIndex = x })
+
+asWidgets :: Lens' AppState (V.Vector Name)
+asWidgets = lens _asWidgets (\appstate x -> appstate { _asWidgets = x })
+
+asFocus :: Lens' AppState (Brick.FocusRing Name)
+asFocus = lens _asFocus (\appstate x -> appstate { _asFocus = x })
+
+asConfig :: Lens' AppState Configuration
+asConfig = lens _asConfig (\appstate x -> appstate { _asConfig = x })
 
 data Action ctx a where
   GenericAction :: String -> (AppState -> EventM Name a) -> Action ctx a
@@ -94,7 +106,8 @@ kbAction = to (\(Keybinding _ b) -> b)
 
 data Configuration = Configuration
   { _confListOfThreadsKeybindings :: [Keybinding (L.List Name T.Text) (Next AppState)]
-  , _confSearchThreadsKeybindings :: [Keybinding (E.Editor T.Text Name) (Next AppState)]
+  , _confListOfMailsKeybindings :: [Keybinding (L.List Name T.Text) (Next AppState)]
+  , _confSearchThreadsKeybindings :: [Keybinding (L.List Name T.Text) (Next AppState)]
   }
 
 
@@ -281,6 +294,26 @@ theApp =
     , M.appAttrMap = const theme
     }
 
+config :: Configuration
+config = Configuration {
+  _confListOfThreadsKeybindings = [
+      Keybinding (Vty.EvKey (Vty.KChar 'j') []) (listDown (asMailIndex . miListOfThreads) `chain` continue)
+      , Keybinding (Vty.EvKey (Vty.KChar 'k') []) (listUp (asMailIndex . miListOfThreads) `chain` continue)
+      , Keybinding (Vty.EvKey Vty.KEnter []) (focus ListOfMails `chain` continue)
+      , Keybinding (Vty.EvKey (Vty.KChar ':') []) (focus SearchThreadsEditor `chain` continue)
+      , Keybinding (Vty.EvKey (Vty.KChar 'q') []) quit
+      ]
+  , _confListOfMailsKeybindings = [
+      Keybinding (Vty.EvKey (Vty.KChar 'j') []) (listDown (asMailIndex . miListOfMails) `chain` continue)
+      , Keybinding (Vty.EvKey (Vty.KChar 'k') []) (listUp (asMailIndex . miListOfMails) `chain` continue)
+      , Keybinding (Vty.EvKey (Vty.KChar 'q') []) (focus ListOfThreads `chain` continue)
+      ]
+  , _confSearchThreadsKeybindings = [
+      Keybinding (Vty.EvKey Vty.KEsc []) (focus ListOfThreads `chain` continue)
+      , Keybinding (Vty.EvKey Vty.KEnter []) (simulateNewSearchResult (asMailIndex . miListOfThreads) `chain` focus ListOfThreads `chain` continue)
+      ]
+  }
+
 initialState :: AppState
 initialState =
     let mi =
@@ -303,7 +336,7 @@ initialState =
                 (L.list ListOfAttachments V.empty 1)
         view' = V.fromList [ListOfThreads, StatusBar, SearchThreadsEditor]
         ring = Brick.focusRing [ListOfThreads, SearchThreadsEditor]
-    in AppState mi compose view' ring
+    in AppState mi compose view' ring config
 
 main :: IO ()
 main = void $ M.defaultMain theApp initialState
