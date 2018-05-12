@@ -91,7 +91,7 @@ asConfig :: Lens' AppState Configuration
 asConfig = lens _asConfig (\appstate x -> appstate { _asConfig = x })
 
 data Action ctx a where
-  GenericAction :: String -> (AppState -> EventM Name a) -> Action ctx a
+  AppAction :: String -> (AppState -> EventM Name a) -> Action ctx a
   Action :: String -> (Lens' AppState ctx -> AppState -> EventM Name a) -> Lens' AppState ctx -> Action ctx a
 
 data Keybinding ctx a = Keybinding
@@ -175,11 +175,11 @@ listDrawElement selected item = if selected then withAttr L.listSelectedAttr (tx
 -- | quickfix internal actions, which are usually generated and stripped of
 -- their modes. Also they're not composable and don't have any descriptions.
 continue :: Action ctx (Next AppState)
-continue = GenericAction "" M.continue
+continue = AppAction "" M.continue
 
 quit :: Action ctx (Next AppState)
 quit =
-    GenericAction "" M.halt
+    AppAction "" M.halt
 
 -- list actions currently only made to interact with the list of threads
 listUp :: Lens' AppState (L.List Name T.Text) -> Action (L.List Name T.Text) AppState
@@ -190,7 +190,7 @@ listDown l = Action "list down" (\l' s -> pure $ over l' L.listMoveDown s) l
 
 focus :: Name -> Action a AppState
 focus n =
-    GenericAction
+    AppAction
         "switch mode"
         (pure
          . over asFocus (Brick.focusSetCurrent n)
@@ -213,11 +213,11 @@ simulateNewSearchResult l = Action "" (\l' -> pure . over l' (L.listReplace (V.f
 chain :: Action ctx AppState -> Action ctx a -> Action ctx a
 chain (Action d1 f1 l) (Action d2 f2 _) =
   Action (if null d2 then d1 else d1 <> " and then " <> d2) (f1 `chainF` f2) l
-chain (GenericAction d1 f1) (GenericAction d2 f2) =
-  GenericAction (if null d2 then d1 else d1 <> " and then " <> d2) (f1 >=> f2)
-chain (GenericAction d1 f1) (Action d2 f2 l) =
+chain (AppAction d1 f1) (AppAction d2 f2) =
+  AppAction (if null d2 then d1 else d1 <> " and then " <> d2) (f1 >=> f2)
+chain (AppAction d1 f1) (Action d2 f2 l) =
   Action (if null d2 then d1 else d1 <> " and then " <> d2) (f1 `chainF'` f2) l
-chain (Action d1 f1 l) (GenericAction d2 f2) =
+chain (Action d1 f1 l) (AppAction d2 f2) =
   Action (if null d2 then d1 else d1 <> " and then " <> d2) (f1 `chainF''` f2) l
 
 -- Helper functions to compose Action functions
@@ -254,16 +254,16 @@ appEvent s (VtyEvent ev) = let currentlyFocused = fromMaybe ListOfThreads (Brick
                            in case currentlyFocused of
                                 SearchThreadsEditor -> case lookupKeybinding ev (view (asConfig . confSearchThreadsKeybindings) s) of
                                   Just (Keybinding _ (Action _ a l)) -> a l s
-                                  Just (Keybinding _ (GenericAction _ a)) -> a s
+                                  Just (Keybinding _ (AppAction _ a)) -> a s
                                   Nothing -> M.continue s -- would be the fallback
                                 ListOfMails -> case lookupKeybinding ev (view (asConfig . confListOfMailsKeybindings) s) of
                                   Just (Keybinding _ (Action _ a l)) -> a l s
-                                  Just (Keybinding _ (GenericAction _ a)) -> a s
+                                  Just (Keybinding _ (AppAction _ a)) -> a s
                                   Nothing -> M.continue s -- would be the fallback
                                 -- TODO: default to ListOfThreads for this POC
                                 _ -> case lookupKeybinding ev (view (asConfig . confListOfThreadsKeybindings) s) of
                                   Just (Keybinding _ (Action _ a l)) -> a l s
-                                  Just (Keybinding _ (GenericAction _ a)) -> a s
+                                  Just (Keybinding _ (AppAction _ a)) -> a s
                                   Nothing -> M.continue s -- would be the fallback
 appEvent s _ = M.continue s
 
