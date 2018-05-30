@@ -10,10 +10,8 @@ import Control.Monad (void)
 import Graphics.Vty (Event (..))
 import Data.Foldable (find)
 import Data.Maybe (fromMaybe)
-import Data.Proxy
 import Data.Semigroup ((<>), Semigroup)
 import Data.Monoid (Monoid, mempty, mappend)
-import qualified Data.CircularList as CList
 import qualified Data.Map as Map
 import qualified Data.Vector as V
 import qualified Data.Text as T
@@ -25,11 +23,10 @@ import qualified Brick.Focus as Brick
 import qualified Brick.AttrMap as A
 import Brick.Util (on)
 import Brick.Widgets.Core
-       (fill, emptyWidget, str, hLimit, padLeft, txt, vBox, vLimit,
-        withAttr, (<+>), (<=>))
+       (fill, emptyWidget, str, padLeft, txt, vLimit, withAttr, (<+>),
+        (<=>))
 import Brick.Types
-       (Widget, BrickEvent(..), Next, EventM, Padding(..),
-        handleEventLensed)
+       (Widget, BrickEvent(..), Next, EventM, Padding(..))
 
 -- | Used to identify widgets in brick
 data Name =
@@ -69,12 +66,40 @@ newtype InternalAction = InternalAction (AppState -> EventM Name (Next AppState)
 iAction :: Lens' InternalAction (AppState -> EventM Name (Next AppState))
 iAction f (InternalAction a) = fmap InternalAction (f a)
 
+data ViewName
+    = Threads
+    | Mails
+    | ComposeView
+    deriving (Eq,Ord)
+
+data View = View
+    { _vFocus :: Brick.FocusRing Name
+    , _vWidgets :: [Name]
+    }
+
+vWidgets :: Lens' View [Name]
+vWidgets = lens _vWidgets (\settings x -> settings { _vWidgets = x })
+
+vFocus :: Lens' View (Brick.FocusRing Name)
+vFocus = lens _vFocus (\settings x -> settings { _vFocus = x})
+
+data ViewSettings = ViewSettings
+    { _vsViews :: Map.Map ViewName View
+    , _vsFocusedView :: Brick.FocusRing ViewName
+    }
+
+vsViews :: Lens' ViewSettings (Map.Map ViewName View)
+vsViews = lens _vsViews (\settings x -> settings { _vsViews = x })
+
+vsFocusedView :: Lens' ViewSettings (Brick.FocusRing ViewName)
+vsFocusedView = lens _vsFocusedView (\settings x -> settings { _vsFocusedView = x})
+
 data AppState = AppState
     { _asMailIndex :: MailIndex
     , _asCompose :: Compose
-    , _asWidgets :: V.Vector Name
-    , _asFocus :: Brick.FocusRing Name
+    , _asViewSettings :: ViewSettings
     , _asKeybindings :: Map.Map Name [InternalKeybinding]
+    , _asDefaultView :: ViewName -- should be in configuration
     }
 makeLenses ''AppState
 
@@ -90,11 +115,32 @@ data Keybinding (ctx :: Name) = Keybinding
     }
 makeLenses ''Keybinding
 
+-- | utilities
+--
+focusedViewWidget :: AppState -> Name
+focusedViewWidget s =
+    let ring = view vFocus (focusedView s)
+    in fromMaybe ListOfThreads $ Brick.focusGetCurrent ring
+
+focusedViewWidgets :: AppState -> [Name]
+focusedViewWidgets s =
+    let defaultV = view asDefaultView s
+        focused = fromMaybe defaultV $ Brick.focusGetCurrent $ view (asViewSettings . vsFocusedView) s
+    in view (asViewSettings . vsViews . at focused . _Just . vWidgets) s
+
+focusedViewName :: AppState -> ViewName
+focusedViewName s =
+    let defaultV = view asDefaultView s
+    in fromMaybe defaultV $ Brick.focusGetCurrent $ view (asViewSettings . vsFocusedView) s
+
+focusedView :: AppState -> View
+focusedView s = let focused = view (asViewSettings . vsViews . at (focusedViewName s)) s
+                in fromMaybe indexView focused
 
 -- Drawing code
 --
 drawUI :: AppState -> [Widget Name]
-drawUI s = [unVBox $ foldMap (VBox . renderWidget s) (view asWidgets s)]
+drawUI s = [unVBox $ foldMap (VBox . renderWidget s) (focusedViewWidgets s)]
 
 newtype VBox = VBox { unVBox :: Widget Name }
 
@@ -110,6 +156,7 @@ renderWidget s ListOfThreads = drawListOfThreads s
 renderWidget s SearchThreadsEditor = drawSearchThreadsEditor s
 renderWidget s StatusBar = drawStatusBar s
 renderWidget s ListOfMails = drawListOfMails s
+renderWidget s ManageMailTagsEditor = drawMailTagsEditor s
 
 drawListOfThreads :: AppState -> Widget Name
 drawListOfThreads = renderMailList
@@ -117,7 +164,7 @@ drawListOfThreads = renderMailList
 drawStatusBar :: AppState -> Widget Name
 drawStatusBar s =
   withAttr statusbarAttr $
-  str (show (Brick.focusGetCurrent (view asFocus s))) <+>
+  str (show (focusedViewWidget s)) <+>
   padLeft
       (Pad 1)
       (str
@@ -128,18 +175,18 @@ drawStatusBar s =
   vLimit 1 (fill ' ')
 
 drawListOfMails :: AppState -> Widget Name
-drawListOfMails s =
-  let hasFocus = Just ListOfMails == Brick.focusGetCurrent (view asFocus s)
-  in L.renderList listDrawElement hasFocus $ view (asMailIndex . miListOfMails) s
+drawListOfMails s = L.renderList listDrawElement True $ view (asMailIndex . miListOfMails) s
 
 drawSearchThreadsEditor :: AppState -> Widget Name
 drawSearchThreadsEditor s =
-  let hasFocus = Just SearchThreadsEditor == Brick.focusGetCurrent (view asFocus s)
-  in vLimit 1 $ E.renderEditor (txt . T.unlines) hasFocus $ view (asMailIndex . miSearchThreadsEditor) s
+  vLimit 1 $ E.renderEditor (txt . T.unlines) True $ view (asMailIndex . miSearchThreadsEditor) s
+
+drawMailTagsEditor :: AppState -> Widget Name
+drawMailTagsEditor s =
+  vLimit 1 $ E.renderEditor (txt . T.unlines) True $ view (asMailIndex . miMailTagsEditor) s
 
 renderMailList :: AppState -> Widget Name
-renderMailList s = let hasFocus = Just ListOfThreads == Brick.focusGetCurrent (view asFocus s)
-                   in L.renderList listDrawElement hasFocus $ view (asMailIndex . miListOfThreads) s
+renderMailList s = L.renderList listDrawElement True $ view (asMailIndex . miListOfThreads) s
 
 listDrawElement :: Bool -> T.Text -> Widget Name
 listDrawElement selected item = if selected then withAttr L.listSelectedAttr (txt item) <+> vLimit 1 (fill ' ')
@@ -167,9 +214,7 @@ listDown = InternalAction (M.continue . over (asMailIndex . miListOfThreads) L.l
 -- what we say should be shown in the index screen, e.g. list of threads, status
 -- bar and search threads.
 backToIndex :: InternalAction
-backToIndex = InternalAction (M.continue
-                              . over asFocus (Brick.focusRingModify (CList.update ListOfThreads))
-                              . over asWidgets (V.// [(0, ListOfThreads)]))
+backToIndex = InternalAction (M.continue . changeView Threads)
 
 -- Instead of activating another mode and statically draw everything belonging
 -- to this mode, just replace the list widget and set the focus on the new list
@@ -177,22 +222,39 @@ backToIndex = InternalAction (M.continue
 -- focus ring to jump between searching threads and showing the current thread
 -- mails.
 activateListOfMails :: InternalAction
-activateListOfMails = InternalAction (M.continue
-                                      . over asFocus (Brick.focusRingModify (CList.update ListOfMails))
-                                      . over asWidgets (V.// [(0, ListOfMails)]))
+activateListOfMails = InternalAction (M.continue . changeView Mails)
 
 activateSearchThreads :: InternalAction
-activateSearchThreads = InternalAction (M.continue . over asFocus (Brick.focusSetCurrent SearchThreadsEditor))
+activateSearchThreads =
+    InternalAction
+        (\s -> M.continue $ over (asViewSettings
+                     . vsViews
+                     . at (focusedViewName s)
+                     . _Just
+                     . vFocus)
+                  (Brick.focusSetCurrent SearchThreadsEditor)
+                  s)
 
 focusNext :: InternalAction
-focusNext = InternalAction (M.continue . over asFocus Brick.focusNext)
+focusNext =
+    InternalAction
+        (\s ->
+              M.continue $
+              over
+                  (asViewSettings .
+                   vsViews . at (focusedViewName s) . _Just . vFocus)
+                  Brick.focusNext
+                  s)
+
+nextView :: InternalAction
+nextView = InternalAction (M.continue . over (asViewSettings . vsFocusedView) Brick.focusNext)
 
 simulateNewSearchResult :: InternalAction
 simulateNewSearchResult = InternalAction (M.continue
-                                          . over (asMailIndex . miListOfThreads) (L.listReplace (V.fromList ["Result 1", "Result 2"]) (Just 0))
-                                          -- would be a composed action
-                                          . over asFocus (Brick.focusRingModify (CList.update ListOfThreads))
-                                          . over asWidgets (V.// [(0, ListOfThreads)]))
+                                          . over (asMailIndex . miListOfThreads) (L.listReplace (V.fromList ["Result 1", "Result 2"]) (Just 0)))
+
+changeView :: ViewName -> AppState -> AppState
+changeView vn s = over (asViewSettings . vsFocusedView) (Brick.focusSetCurrent vn) s
 
 -- | quickfix map which has already the Keybindings hacked in. Ideally we'd like
 --- to fill this based on currently focused widget names and the Keybindings come out of the config
@@ -206,16 +268,22 @@ keybindingMap =
             , InternalKeybinding
                   (Vty.EvKey (Vty.KChar 'q') [])
                   (InternalAction M.halt)
-            , InternalKeybinding (Vty.EvKey (Vty.KChar ':') []) activateSearchThreads])
+            , InternalKeybinding (Vty.EvKey (Vty.KChar ':') []) activateSearchThreads
+            , InternalKeybinding (Vty.EvKey (Vty.KChar 'n') [Vty.MCtrl]) nextView
+            ])
         , ( ListOfMails
           , [InternalKeybinding (Vty.EvKey (Vty.KChar 'q') []) backToIndex
-            , InternalKeybinding (Vty.EvKey (Vty.KChar ':') []) activateSearchThreads])
+            , InternalKeybinding (Vty.EvKey (Vty.KChar ':') []) activateSearchThreads
+            , InternalKeybinding (Vty.EvKey (Vty.KChar 'n') [Vty.MCtrl]) nextView
+            ])
         -- The search editor isn't doing anything. In fact it does nothing,
         -- since this POC does not support sending all non-matching input for
         -- the editor to the fallback key handler
         , ( SearchThreadsEditor
           , [InternalKeybinding (Vty.EvKey Vty.KEsc []) focusNext
-            , InternalKeybinding (Vty.EvKey Vty.KEnter []) simulateNewSearchResult ])
+            , InternalKeybinding (Vty.EvKey Vty.KEnter []) simulateNewSearchResult
+            , InternalKeybinding (Vty.EvKey (Vty.KChar 'n') [Vty.MCtrl]) nextView
+            ])
         ]
 
 lookupKeybinding :: Event -> Maybe [InternalKeybinding] -> Maybe InternalKeybinding
@@ -223,8 +291,7 @@ lookupKeybinding _ Nothing = Nothing
 lookupKeybinding e (Just kbs) = find (\(InternalKeybinding kbEv _) -> kbEv == e) kbs
 
 dispatch :: AppState -> Event -> EventM Name (Next AppState)
-dispatch s e = let ring = view asFocus s
-                   currentlyFocused = fromMaybe ListOfThreads (Brick.focusGetCurrent ring)
+dispatch s e = let currentlyFocused = focusedViewWidget s
                    kbs = Map.lookup currentlyFocused keybindingMap
                in case lookupKeybinding e kbs of
                       Just (InternalKeybinding _ kb) -> s & view iAction kb
@@ -256,6 +323,18 @@ theApp =
     , M.appAttrMap = const theme
     }
 
+indexView :: View
+indexView =
+    let widgets = [ListOfThreads, StatusBar, SearchThreadsEditor]
+        ring = Brick.focusRing [ListOfThreads, SearchThreadsEditor]
+    in View ring widgets
+
+mailView :: View
+mailView =
+    let widgets = [ListOfMails, StatusBar, ManageMailTagsEditor]
+        ring = Brick.focusRing [ListOfMails, ManageMailTagsEditor]
+    in View ring widgets
+
 initialState :: AppState
 initialState =
     let mi =
@@ -276,9 +355,12 @@ initialState =
                 (Brick.focusRing
                      [ComposeFrom, ComposeTo, ComposeSubject, ListOfAttachments])
                 (L.list ListOfAttachments V.empty 1)
-        view' = V.fromList [ListOfThreads, StatusBar, SearchThreadsEditor]
-        ring = Brick.focusRing [ListOfThreads, SearchThreadsEditor]
-    in AppState mi compose view' ring Map.empty
+        viewsettings =
+            ViewSettings
+            { _vsViews = Map.fromList [(Threads, indexView), (Mails, mailView)]
+            , _vsFocusedView = Brick.focusRing [Threads, Mails]
+            }
+    in AppState mi compose viewsettings Map.empty Threads
 
 main :: IO ()
 main = void $ M.defaultMain theApp initialState
