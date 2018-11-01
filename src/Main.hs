@@ -10,26 +10,30 @@ import Control.Monad (void)
 import Graphics.Vty (Event (..))
 import Data.Foldable (find)
 import Data.Maybe (fromMaybe)
-import Data.Proxy
 import Data.Semigroup ((<>), Semigroup)
 import Data.Monoid (Monoid, mempty, mappend)
+import Data.Time.Clock (UTCTime(..), utctDay, secondsToDiffTime)
+import Data.Time.Calendar (Day(..))
+import Data.Time.Format (formatTime, defaultTimeLocale)
 import qualified Data.CircularList as CList
 import qualified Data.Map as Map
 import qualified Data.Vector as V
 import qualified Data.Text as T
+import qualified Data.Text.Encoding as T
+import qualified Data.Text.Encoding.Error as T
+import qualified Data.ByteString as B
 import qualified Graphics.Vty as Vty
 import qualified Brick.Main as M
 import qualified Brick.Widgets.Edit as E
 import qualified Brick.Widgets.List as L
 import qualified Brick.Focus as Brick
 import qualified Brick.AttrMap as A
-import Brick.Util (on)
+import Brick.Util (fg, on)
 import Brick.Widgets.Core
-       (fill, emptyWidget, str, hLimit, padLeft, txt, vBox, vLimit,
-        withAttr, (<+>), (<=>))
+       (fill, emptyWidget, str, padLeft, txt, hBox, vLimit,
+        withAttr, (<+>), (<=>), hLimitPercent)
 import Brick.Types
-       (Widget, BrickEvent(..), Next, EventM, Padding(..),
-        handleEventLensed)
+       (Widget, BrickEvent(..), Next, EventM, Padding(..))
 
 -- | Used to identify widgets in brick
 data Name =
@@ -54,8 +58,19 @@ data Compose = Compose
     }
 makeLenses ''Compose
 
+type Tag = B.ByteString
+
+data NotmuchMail = NotmuchMail
+    { _mailSubject :: T.Text
+    , _mailFrom :: T.Text
+    , _mailDate :: UTCTime
+    , _mailTags :: [Tag]
+    , _mailId :: B.ByteString
+    } deriving (Show, Eq)
+makeLenses ''NotmuchMail
+
 data MailIndex = MailIndex
-    { _miListOfMails  :: L.List Name T.Text
+    { _miListOfMails  :: L.List Name NotmuchMail
     , _miListOfThreads :: L.List Name T.Text
     , _miSearchThreadsEditor :: E.Editor T.Text Name
     , _miMailTagsEditor :: E.Editor T.Text Name
@@ -123,14 +138,14 @@ drawStatusBar s =
       (str
            (show
                 (view
-                     (asMailIndex . miListOfThreads . L.listSelectedL)
+                     (asMailIndex . miListOfMails . L.listSelectedL)
                      s))) <+>
   vLimit 1 (fill ' ')
 
 drawListOfMails :: AppState -> Widget Name
 drawListOfMails s =
   let hasFocus = Just ListOfMails == Brick.focusGetCurrent (view asFocus s)
-  in L.renderList listDrawElement hasFocus $ view (asMailIndex . miListOfMails) s
+  in L.renderList listDrawMail hasFocus $ view (asMailIndex . miListOfMails) s
 
 drawSearchThreadsEditor :: AppState -> Widget Name
 drawSearchThreadsEditor s =
@@ -145,6 +160,65 @@ listDrawElement :: Bool -> T.Text -> Widget Name
 listDrawElement selected item = if selected then withAttr L.listSelectedAttr (txt item) <+> vLimit 1 (fill ' ')
                                 else txt item
 
+listDrawMail :: Bool -> NotmuchMail -> Widget Name
+listDrawMail sel a =
+    let isNewMail = True
+        nmNewTag = "unread"
+        widget = hBox
+          -- NOTE: I believe that inserting a `str " "` is more efficient than
+          -- `padLeft/Right (Pad 1)`.  This hypothesis should be tested.
+          [ padLeft (Pad 1) (txt $ formatDate (view mailDate a))
+          , padLeft (Pad 1) (renderAuthors sel $ view mailFrom a)
+          , padLeft (Pad 1) (renderTagsWidget (view mailTags a) nmNewTag)
+          , padLeft (Pad 1) (txt (view mailSubject a))
+          , fillLine
+          ]
+    in withAttr (getListAttr isNewMail sel) widget
+
+getListAttr :: Bool  -- ^ new?
+            -> Bool  -- ^ selected?
+            -> A.AttrName
+getListAttr True True = listNewMailSelectedAttr  -- new and selected
+getListAttr True False = listNewMailAttr  -- new and not selected
+getListAttr False True = listSelectedAttr  -- not new but selected
+getListAttr False False = listAttr  -- not selected and not new
+
+fillLine :: Widget Name
+fillLine = vLimit 1 (fill ' ')
+
+formatDate :: UTCTime -> T.Text
+formatDate t = T.pack $ formatTime defaultTimeLocale "%d/%b" (utctDay t)
+
+renderAuthors :: Bool -> T.Text -> Widget Name
+renderAuthors isSelected authors =
+    let attribute =
+            if isSelected
+                then mailSelectedAuthorsAttr
+                else mailAuthorsAttr
+    in withAttr attribute $ hLimitPercent 20 (txt authors <+> fillLine)
+
+mailAttr :: A.AttrName
+mailAttr = "mail"
+
+mailTagsAttr :: A.AttrName
+mailTagsAttr = mailAttr <> "tags"
+
+mailAuthorsAttr :: A.AttrName
+mailAuthorsAttr = mailAttr <> "authors"
+
+mailSelectedAuthorsAttr :: A.AttrName
+mailSelectedAuthorsAttr = mailAuthorsAttr <> "selected"
+
+renderTagsWidget :: [Tag] -> Tag -> Widget Name
+renderTagsWidget tgs ignored' =
+    let ts = filter (/= ignored') tgs
+    in withAttr mailTagsAttr $ vLimit 1 $ txt $ decodeLenient $ B.intercalate " " $ fmap getTag ts
+
+getTag :: Tag -> B.ByteString
+getTag = id
+
+decodeLenient :: B.ByteString -> T.Text
+decodeLenient = T.decodeUtf8With T.lenientDecode
 -- Event handling
 --
 -- | quickfix internal actions, which are usually generated and stripped of
@@ -152,10 +226,10 @@ listDrawElement selected item = if selected then withAttr L.listSelectedAttr (tx
 
 -- list actions currently only made to interact with the list of threads
 listUp :: InternalAction
-listUp = InternalAction (M.continue . over (asMailIndex . miListOfThreads) L.listMoveUp)
+listUp = InternalAction (M.continue . over (asMailIndex . miListOfMails) L.listMoveUp)
 
 listDown :: InternalAction
-listDown = InternalAction (M.continue . over (asMailIndex . miListOfThreads) L.listMoveDown)
+listDown = InternalAction (M.continue . over (asMailIndex . miListOfMails) L.listMoveDown)
 
 -- These two were former mode changes.
 -- Back to index means that we want to return to the list of threads, home
@@ -209,6 +283,8 @@ keybindingMap =
             , InternalKeybinding (Vty.EvKey (Vty.KChar ':') []) activateSearchThreads])
         , ( ListOfMails
           , [InternalKeybinding (Vty.EvKey (Vty.KChar 'q') []) backToIndex
+            , InternalKeybinding (Vty.EvKey (Vty.KChar 'j') []) listDown
+            , InternalKeybinding (Vty.EvKey (Vty.KChar 'k') []) listUp
             , InternalKeybinding (Vty.EvKey (Vty.KChar ':') []) activateSearchThreads])
         -- The search editor isn't doing anything. In fact it does nothing,
         -- since this POC does not support sending all non-matching input for
@@ -224,7 +300,7 @@ lookupKeybinding e (Just kbs) = find (\(InternalKeybinding kbEv _) -> kbEv == e)
 
 dispatch :: AppState -> Event -> EventM Name (Next AppState)
 dispatch s e = let ring = view asFocus s
-                   currentlyFocused = fromMaybe ListOfThreads (Brick.focusGetCurrent ring)
+                   currentlyFocused = fromMaybe ListOfMails (Brick.focusGetCurrent ring)
                    kbs = Map.lookup currentlyFocused keybindingMap
                in case lookupKeybinding e kbs of
                       Just (InternalKeybinding _ kb) -> s & view iAction kb
@@ -239,11 +315,26 @@ appEvent s _ = M.continue s
 statusbarAttr :: A.AttrName
 statusbarAttr = "statusbar"
 
+listAttr :: A.AttrName
+listAttr = L.listAttr
+
+listSelectedAttr :: A.AttrName
+listSelectedAttr = L.listSelectedAttr
+
+listNewMailAttr :: A.AttrName
+listNewMailAttr = L.listAttr <> "newmail"
+
+listNewMailSelectedAttr :: A.AttrName
+listNewMailSelectedAttr = listNewMailAttr <> L.listSelectedAttr
+
 theme :: A.AttrMap
 theme =
     A.attrMap
         Vty.defAttr
         [ (L.listSelectedAttr, Vty.blue `on` Vty.white)
+        , (listSelectedAttr, Vty.white `on` Vty.yellow)
+        , (listNewMailAttr, fg Vty.brightGreen `Vty.withStyle` Vty.bold)
+        , (listNewMailSelectedAttr, Vty.white `on` Vty.yellow `Vty.withStyle` Vty.bold)
         , (statusbarAttr, Vty.black `on` Vty.brightWhite)]
 
 theApp :: M.App AppState e Name
@@ -260,14 +351,18 @@ initialState :: AppState
 initialState =
     let mi =
             MailIndex
-                (L.list
-                     ListOfMails
-                     (V.fromList ["Mail 1", "Mail 2", "Mail 3"])
-                     1)
+                (L.list ListOfMails (V.replicate 500 m) 1)
                 (L.list ListOfThreads (V.fromList ["Thread 1", "Thread 2"]) 1)
                 (E.editorText SearchThreadsEditor Nothing "tag:foobar")
                 (E.editorText ManageMailTagsEditor Nothing "")
                 (E.editorText ManageThreadTagsEditor Nothing "")
+        m =
+            NotmuchMail
+                "This is the Subject"
+                "From"
+                (UTCTime (ModifiedJulianDay 23) (secondsToDiffTime 12312))
+                ["unread", "index"]
+                "asdf"
         compose =
             Compose
                 (E.editorText ComposeFrom (Just 1) "")
@@ -276,8 +371,8 @@ initialState =
                 (Brick.focusRing
                      [ComposeFrom, ComposeTo, ComposeSubject, ListOfAttachments])
                 (L.list ListOfAttachments V.empty 1)
-        view' = V.fromList [ListOfThreads, StatusBar, SearchThreadsEditor]
-        ring = Brick.focusRing [ListOfThreads, SearchThreadsEditor]
+        view' = V.fromList [ListOfMails, StatusBar, SearchThreadsEditor]
+        ring = Brick.focusRing [ListOfMails, SearchThreadsEditor]
     in AppState mi compose view' ring Map.empty
 
 main :: IO ()
